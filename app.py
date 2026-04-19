@@ -1,15 +1,30 @@
 from flask import Flask, render_template, request, jsonify, session
 import os
+import re
 import json
 import uuid
+import logging
 from datetime import datetime
 from pathlib import Path
 from dotenv import load_dotenv
 
 load_dotenv()
 
+logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s: %(message)s')
+log = logging.getLogger('cannaguide')
+
+FLASK_DEBUG = os.environ.get('FLASK_DEBUG', '').lower() in ('1', 'true', 'yes')
+
+SECRET_KEY = os.environ.get('SECRET_KEY')
+if not SECRET_KEY:
+    if FLASK_DEBUG:
+        SECRET_KEY = 'canna-dev-secret-change-me'
+        log.warning('SECRET_KEY not set — using dev fallback (debug mode only).')
+    else:
+        raise RuntimeError('SECRET_KEY must be set in .env for non-debug runs.')
+
 app = Flask(__name__)
-app.secret_key = os.environ.get('SECRET_KEY', 'canna-dev-secret-change-me')
+app.secret_key = SECRET_KEY
 
 GOOGLE_API_KEY = os.environ.get('GOOGLE_API_KEY', '')
 
@@ -19,6 +34,21 @@ CHATS_DIR = DATA_DIR / 'chats'
 
 for d in [PROFILES_DIR, CHATS_DIR]:
     d.mkdir(parents=True, exist_ok=True)
+
+USERNAME_RE = re.compile(r'^[a-z0-9_]{1,32}$')
+CHAT_ID_RE = re.compile(r'^[a-f0-9-]{36}$')
+CHAT_HISTORY_WINDOW = 20
+
+
+def safe_username(raw):
+    if not isinstance(raw, str):
+        return None
+    cleaned = raw.strip().lower().replace(' ', '_')
+    return cleaned if USERNAME_RE.match(cleaned) else None
+
+
+def safe_chat_id(raw):
+    return raw if isinstance(raw, str) and CHAT_ID_RE.match(raw) else None
 
 
 def load_json(path):
@@ -40,16 +70,16 @@ def index():
 @app.route('/api/profile', methods=['GET', 'POST'])
 def profile_api():
     if request.method == 'GET':
-        username = session.get('username')
+        username = safe_username(session.get('username'))
         if not username:
             return jsonify({'profile': None})
         data = load_json(PROFILES_DIR / f'{username}.json')
         return jsonify({'profile': data})
 
-    body = request.get_json()
-    username = body.get('username', '').strip().lower().replace(' ', '_')
+    body = request.get_json() or {}
+    username = safe_username(body.get('username', ''))
     if not username:
-        return jsonify({'error': 'Username is required'}), 400
+        return jsonify({'error': 'Username must be 1–32 chars, letters/numbers/underscore only.'}), 400
 
     existing = load_json(PROFILES_DIR / f'{username}.json')
     created_at = existing['created_at'] if existing else datetime.now().isoformat()
@@ -86,13 +116,17 @@ def chat_api():
             'error': 'No API key set. Add your GOOGLE_API_KEY to the .env file and restart.'
         }), 503
 
-    body = request.get_json()
+    body = request.get_json() or {}
     user_message = body.get('message', '').strip()
     if not user_message:
         return jsonify({'error': 'Message is required'}), 400
 
-    username = session.get('username')
-    chat_id = session.setdefault('chat_id', str(uuid.uuid4()))
+    username = safe_username(session.get('username'))
+
+    chat_id = safe_chat_id(session.get('chat_id'))
+    if not chat_id:
+        chat_id = str(uuid.uuid4())
+        session['chat_id'] = chat_id
 
     profile = load_json(PROFILES_DIR / f'{username}.json') if username else None
     history = load_json(CHATS_DIR / f'{chat_id}.json') or []
@@ -106,8 +140,9 @@ def chat_api():
 
         client = genai.Client(api_key=GOOGLE_API_KEY)
 
+        windowed = history[-CHAT_HISTORY_WINDOW * 2:]
         contents = []
-        for msg in history:
+        for msg in windowed:
             contents.append(types.Content(
                 role=msg['role'],
                 parts=[types.Part(text=msg['content'])]
@@ -144,8 +179,9 @@ def chat_api():
 
         return jsonify({'response': reply})
 
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+    except Exception:
+        log.exception('chat_api failed (chat_id=%s user=%s)', chat_id, username)
+        return jsonify({'error': 'The model call failed. Check server logs and try again.'}), 500
 
 
 @app.route('/api/new-chat', methods=['POST'])
@@ -161,4 +197,4 @@ def logout():
 
 
 if __name__ == '__main__':
-    app.run(debug=True, port=8080)
+    app.run(debug=FLASK_DEBUG, port=int(os.environ.get('PORT', 8080)))

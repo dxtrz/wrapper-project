@@ -1,0 +1,14 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "dev-server",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["app.py"],
+      "port": 8080,
+      "env": {
+        "FLASK_DEBUG": "1"
+      }
+    }
+  ]
+}

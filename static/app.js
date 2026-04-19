@@ -323,7 +323,9 @@ function appendMessage(role, text) {
   wrap.className = `message ${role}`;
 
   const roleLabel = role === 'user' ? 'You' : 'CannaGuide';
-  const content = role === 'assistant' ? marked.parse(text) : escapeHtml(text);
+  const content = role === 'assistant'
+    ? DOMPurify.sanitize(marked.parse(text))
+    : escapeHtml(text);
 
   wrap.innerHTML = `
     <div class="message-role">${roleLabel}</div>
